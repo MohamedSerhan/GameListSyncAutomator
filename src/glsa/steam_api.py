@@ -71,8 +71,8 @@ def _get_wishlist_official(api_key: str, steam_id: str) -> dict[int, str]:
     return {item["appid"]: "" for item in items}
 
 
-def get_steam_app_list(cache_dir: str, api_key: str = "") -> dict[str, int]:
-    """Return {normalized_name: app_id} for all Steam apps. Cached locally."""
+def get_steam_app_list(cache_dir: str, api_key: str = "") -> dict[str, list[int]]:
+    """Return {normalized_name: [app_ids]} for all Steam apps. Cached locally."""
     cache_path = Path(cache_dir) / "steam_apps.json"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -110,40 +110,39 @@ def get_steam_app_list(cache_dir: str, api_key: str = "") -> dict[str, int]:
             if not batch:
                 break
             apps.extend(batch)
-            # If there are more results, use have_more_results flag
             if not data.get("response", {}).get("have_more_results", False):
                 break
             last_appid = batch[-1]["appid"]
             log.debug("Fetched %d apps so far...", len(apps))
 
-    # Build normalized name -> app_id mapping
-    # For duplicate names, keep the higher app_id (more recent)
-    app_map: dict[str, int] = {}
+    # Build normalized name -> [app_ids] mapping
+    app_map: dict[str, list[int]] = {}
     for app in apps:
         name = app.get("name", "").strip()
         if not name:
             continue
         normalized = name.lower()
-        existing_id = app_map.get(normalized)
-        if existing_id is None or app["appid"] > existing_id:
-            app_map[normalized] = app["appid"]
+        if normalized not in app_map:
+            app_map[normalized] = []
+        app_map[normalized].append(app["appid"])
 
     # Cache it
     with open(cache_path, "w") as f:
         json.dump(app_map, f)
 
-    log.info("Cached %d Steam apps", len(app_map))
+    log.info("Cached %d unique Steam app names", len(app_map))
     return app_map
 
 
 def fill_wishlist_names(
-    wishlist: dict[int, str], app_map: dict[str, int]
+    wishlist: dict[int, str], app_map: dict[str, list[int]]
 ) -> dict[int, str]:
     """Fill in missing names in the wishlist using the app list."""
     # Build reverse map: app_id -> name
     id_to_name: dict[int, str] = {}
-    for name, app_id in app_map.items():
-        id_to_name[app_id] = name
+    for name, app_ids in app_map.items():
+        for app_id in app_ids:
+            id_to_name[app_id] = name
 
     filled: dict[int, str] = {}
     for app_id, name in wishlist.items():

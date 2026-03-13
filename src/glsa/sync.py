@@ -1,14 +1,18 @@
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
+import click
 from rich.console import Console
 from rich.table import Table
 
 from .backloggd import get_backloggd_games
 from .config import Config
-from .matcher import MatchResult, match_games
-from .overrides import load_keep_list, load_overrides
+from .matcher import STORE_URL, MatchResult, match_games
+from .overrides import load_keep_list, load_overrides, save_overrides
 from .steam_api import fill_wishlist_names, get_steam_app_list, get_steam_wishlist
 from .steam_browser import add_to_wishlist, remove_from_wishlist
 
@@ -26,7 +30,57 @@ class SyncPlan:
     kept: list[MatchResult] = field(default_factory=list)
 
 
-def compute_sync_plan(config: Config) -> SyncPlan:
+def resolve_ambiguous_matches(
+    matches: list[MatchResult],
+    overrides: dict[str, int | None],
+    data_dir: str,
+) -> list[MatchResult]:
+    """Interactively resolve ambiguous matches and save choices as overrides."""
+    ambiguous = [m for m in matches if m.ambiguous and not m.override]
+    if not ambiguous:
+        return matches
+
+    console.print(f"\n[bold yellow]Found {len(ambiguous)} ambiguous matches (multiple Steam games with same name):[/]\n")
+
+    for m in ambiguous:
+        console.print(f"  [bold]{m.backloggd_name}[/] matched to [cyan]{m.steam_name}[/] but there are {len(m.candidates)} games with this name:")
+        for i, app_id in enumerate(m.candidates, 1):
+            console.print(f"    {i}) {STORE_URL}/app/{app_id}")
+        console.print(f"    s) Skip (not on Steam)")
+        console.print()
+
+        while True:
+            choice = click.prompt(
+                f"  Pick the correct one for '{m.backloggd_name}'",
+                type=str,
+                default="1",
+            )
+            if choice.lower() == "s":
+                m.steam_app_id = None
+                m.matched = False
+                m.skipped = True
+                m.ambiguous = False
+                overrides[m.backloggd_name] = None
+                break
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(m.candidates):
+                    m.steam_app_id = m.candidates[idx]
+                    m.ambiguous = False
+                    overrides[m.backloggd_name] = m.candidates[idx]
+                    break
+            except ValueError:
+                pass
+            console.print(f"  [red]Invalid choice. Enter 1-{len(m.candidates)} or 's'[/]")
+
+    # Save all choices so user never has to pick again
+    save_overrides(data_dir, overrides)
+    console.print(f"\n[dim]Saved {len(ambiguous)} choices to overrides.json[/]\n")
+
+    return matches
+
+
+def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
     """Compute what needs to change between Backloggd and Steam."""
     overrides = load_overrides(config.data_dir)
     keep_ids = load_keep_list(config.data_dir)
@@ -70,6 +124,16 @@ def compute_sync_plan(config: Config) -> SyncPlan:
     done_matches = match_games(
         done_names, steam_apps, config.match_threshold, overrides
     )
+
+    # Resolve ambiguous matches interactively before building the plan
+    if interactive:
+        wishlist_matches = resolve_ambiguous_matches(
+            wishlist_matches, overrides, config.data_dir
+        )
+        done_matches = resolve_ambiguous_matches(
+            done_matches, overrides, config.data_dir
+        )
+
     done_app_ids = {
         m.steam_app_id for m in done_matches if m.matched and m.steam_app_id
     }
@@ -117,9 +181,11 @@ def display_sync_plan(plan: SyncPlan) -> None:
         table.add_column("Steam Match")
         table.add_column("Score")
         table.add_column("Source")
+        table.add_column("Verify")
         for m in plan.to_add:
             source = "override" if m.override else "fuzzy"
-            table.add_row(m.backloggd_name, m.steam_name or "", str(m.score), source)
+            url = f"store.steampowered.com/app/{m.steam_app_id}" if m.steam_app_id else ""
+            table.add_row(m.backloggd_name, m.steam_name or "", str(m.score), source, url)
         console.print(table)
 
     if plan.to_remove:
@@ -144,7 +210,7 @@ def display_sync_plan(plan: SyncPlan) -> None:
         table.add_column("Best Match")
         table.add_column("Score")
         for m in plan.unmatched:
-            table.add_row(m.backloggd_name, m.steam_name or "—", str(m.score))
+            table.add_row(m.backloggd_name, m.steam_name or "-", str(m.score))
         console.print(table)
 
     if plan.skipped:
@@ -161,6 +227,37 @@ def display_sync_plan(plan: SyncPlan) -> None:
         console.print("\n[bold green]Everything is in sync![/]")
 
 
+def _write_sync_log(
+    config: Config,
+    added: list[int],
+    removed: list[int],
+    plan: SyncPlan,
+) -> None:
+    """Write a sync log entry for undo/audit purposes."""
+    log_dir = Path(config.data_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"sync_{timestamp}.json"
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "added": [
+            {"app_id": m.steam_app_id, "name": m.steam_name, "backloggd": m.backloggd_name}
+            for m in plan.to_add if m.steam_app_id in added
+        ],
+        "removed": [
+            {"app_id": m.steam_app_id, "name": m.steam_name}
+            for m in plan.to_remove if m.steam_app_id in removed
+        ],
+    }
+
+    with open(log_path, "w") as f:
+        json.dump(entry, f, indent=2, ensure_ascii=False)
+
+    console.print(f"[dim]Sync log saved to {log_path}[/]")
+
+
 def execute_sync_plan(
     plan: SyncPlan, config: Config, no_remove: bool = False
 ) -> None:
@@ -170,6 +267,9 @@ def execute_sync_plan(
         [] if no_remove
         else [m.steam_app_id for m in plan.to_remove if m.steam_app_id]
     )
+
+    added: list[int] = []
+    removed: list[int] = []
 
     if add_ids:
         console.print(f"\n[bold]Adding {len(add_ids)} games to Steam wishlist...[/]")
@@ -188,5 +288,9 @@ def execute_sync_plan(
         console.print(
             f"  [red]Successfully removed {len(removed)}/{len(remove_ids)} games[/]"
         )
+
+    # Write sync log for undo/audit
+    if added or removed:
+        _write_sync_log(config, added, removed, plan)
 
     console.print("\n[bold green]Sync complete![/]")

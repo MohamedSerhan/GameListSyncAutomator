@@ -200,10 +200,15 @@ def match(name: str) -> None:
     r = results[0]
 
     if r.skipped:
-        console.print(f"[yellow]Skipped[/] (marked as not on Steam in overrides.json)")
+        console.print("[yellow]Skipped[/] (marked as not on Steam in overrides.json)")
     elif r.override:
-        console.print(f"[green]Override![/] {r.steam_name} (app ID: {r.steam_app_id})")
+        console.print(f"[green]Override![/] {r.steam_name} (app ID: {r.steam_app_id}) {r.store_url}")
+    elif r.matched and r.ambiguous:
+        console.print(f"[yellow]Ambiguous![/] {r.steam_name} has {len(r.candidates)} games:")
+        for app_id in r.candidates:
+            console.print(f"  https://store.steampowered.com/app/{app_id}")
+        console.print("Use: glsa override \"{name}\" <app_id>")
     elif r.matched:
-        console.print(f"[green]Matched![/] {r.steam_name} (app ID: {r.steam_app_id}, score: {r.score})")
+        console.print(f"[green]Matched![/] {r.steam_name} (app ID: {r.steam_app_id}, score: {r.score}) {r.store_url}")
     else:
         console.print(f"[yellow]Best match:[/] {r.steam_name} (score: {r.score}, below threshold {config.match_threshold})")
