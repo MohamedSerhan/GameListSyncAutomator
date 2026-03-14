@@ -113,7 +113,7 @@ async def search_and_add_to_wishlist(
     if not game_names:
         return []
 
-    pw, context = await _launch_context(browser_data_dir, headless=False)
+    pw, context = await _launch_context(browser_data_dir, headless=True)
     succeeded: list[str] = []
     try:
         page = await context.new_page()
