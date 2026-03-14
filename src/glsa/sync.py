@@ -159,6 +159,11 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
         if m.matched and m.steam_app_id:
             all_backloggd_app_ids.add(m.steam_app_id)
 
+    # Also build a set of all Backloggd game names (normalized) for fallback matching
+    all_backloggd_names: set[str] = set()
+    for name in wishlist_names + done_names:
+        all_backloggd_names.add(name.strip().lower())
+
     # Games to remove: on Steam wishlist AND in done list on Backloggd
     # BUT not if they're in the keep list
     for app_id, name in steam_wishlist.items():
@@ -180,6 +185,13 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
                     matched=True,
                 ))
         elif app_id not in all_backloggd_app_ids:
+            # Skip "Unknown" games (not in Steam app list — delisted/unreleased)
+            if name.startswith("Unknown ("):
+                continue
+            # Also skip if the Steam name already matches a Backloggd game name
+            # (handles cases where fuzzy matching couldn't find the app ID)
+            if name.strip().lower() in all_backloggd_names:
+                continue
             # On Steam wishlist but not tracked anywhere on Backloggd
             plan.steam_only.append(MatchResult(
                 backloggd_name="",

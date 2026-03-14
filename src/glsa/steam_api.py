@@ -92,7 +92,7 @@ def get_steam_app_list(cache_dir: str, api_key: str = "") -> dict[str, list[int]
             params: dict = {
                 "max_results": 50000,
                 "include_games": "true",
-                "include_dlc": "false",
+                "include_dlc": "true",
                 "include_hardware": "false",
             }
             if api_key:

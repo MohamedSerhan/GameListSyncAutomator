@@ -1,15 +1,14 @@
 """Backloggd browser automation for adding games to wishlist.
 
 Uses Playwright with a persistent browser context so the user only
-needs to log in once. Login is manual (visible browser), but adding
-games to the wishlist is automated (headless).
+needs to log in once.
 """
 
 import asyncio
 import logging
 from pathlib import Path
 
-from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import BrowserContext, Page, async_playwright
 
 log = logging.getLogger(__name__)
 
@@ -33,21 +32,45 @@ async def _launch_context(
     return pw, context
 
 
-async def _is_logged_in(context: BrowserContext) -> bool:
-    """Check if the user is logged into Backloggd."""
-    page = await context.new_page()
-    try:
-        await page.goto(BASE_URL, timeout=PAGE_TIMEOUT_MS)
-        # Logged-in users have a profile link or avatar in the nav
-        # Look for the user dropdown/avatar which indicates logged-in state
-        logged_in = await page.query_selector("a[href='/users/sign_out']")
-        if logged_in:
-            return True
-        # Also check for profile link pattern
-        profile = await page.query_selector("a.nav-link[href*='/u/']")
-        return profile is not None
-    finally:
-        await page.close()
+async def _is_logged_in(page: Page) -> bool:
+    """Check if the user is logged into Backloggd by checking the current page."""
+    sign_in_link = await page.query_selector("a[href='/users/sign_in']")
+    return sign_in_link is None
+
+
+async def _login(
+    page: Page, username: str, password: str, manual: bool = False
+) -> None:
+    """Log into Backloggd on the given page."""
+    await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT_MS)
+    await page.wait_for_load_state("domcontentloaded")
+
+    if not manual and username and password:
+        log.info("Logging into Backloggd automatically...")
+        await page.fill("#user_login", username)
+        await page.fill("#user_password", password)
+        remember = await page.query_selector("#user_remember_me")
+        if remember and not await remember.is_checked():
+            await remember.check()
+        await page.click("button[type='submit'][name='commit']")
+
+        try:
+            await page.wait_for_url(
+                lambda url: "/users/sign_in" not in url,
+                timeout=PAGE_TIMEOUT_MS,
+            )
+        except Exception:
+            alert = await page.query_selector(".alert")
+            msg = await alert.inner_text() if alert else "Unknown error"
+            raise RuntimeError(f"Backloggd login failed: {msg.strip()}")
+        log.info("Backloggd login successful!")
+    else:
+        log.info("Please log into Backloggd in the browser window...")
+        await page.wait_for_url(
+            lambda url: "/users/sign_in" not in url,
+            timeout=LOGIN_TIMEOUT_MS,
+        )
+        log.info("Backloggd login successful!")
 
 
 async def ensure_backloggd_login(
@@ -55,69 +78,19 @@ async def ensure_backloggd_login(
     username: str = "",
     password: str = "",
 ) -> None:
-    """Log into Backloggd automatically using credentials, or manually if not provided."""
-    pw, context = await _launch_context(browser_data_dir, headless=bool(username and password))
+    """Log into Backloggd. Used by `glsa login backloggd`."""
+    pw, context = await _launch_context(
+        browser_data_dir, headless=bool(username and password)
+    )
     try:
-        if await _is_logged_in(context):
-            log.info("Already logged into Backloggd")
-            return
-
         page = await context.new_page()
-        await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT_MS)
+        await page.goto(BASE_URL, timeout=PAGE_TIMEOUT_MS)
         await page.wait_for_load_state("domcontentloaded")
 
-        if username and password:
-            log.info("Logging into Backloggd automatically...")
-            # Fill in the login form — Backloggd uses Devise (Rails)
-            # The email/username field and password field
-            email_field = await page.query_selector(
-                "input[name='user[email]'], "
-                "input[name='user[login]'], "
-                "input[type='email'], "
-                "input#user_email"
-            )
-            pass_field = await page.query_selector(
-                "input[name='user[password]'], "
-                "input[type='password'], "
-                "input#user_password"
-            )
-
-            if not email_field or not pass_field:
-                log.warning("Could not find login form fields, falling back to manual login")
-                await page.wait_for_selector(
-                    "a[href='/users/sign_out'], a.nav-link[href*='/u/']",
-                    timeout=LOGIN_TIMEOUT_MS,
-                )
-            else:
-                await email_field.fill(username)
-                await pass_field.fill(password)
-
-                # Click submit
-                submit_btn = await page.query_selector(
-                    "input[type='submit'], "
-                    "button[type='submit'], "
-                    "button:has-text('Log In'), "
-                    "input[value='Log In'], "
-                    "input[value='Log in']"
-                )
-                if submit_btn:
-                    await submit_btn.click()
-                else:
-                    await pass_field.press("Enter")
-
-                # Wait for login to complete
-                await page.wait_for_selector(
-                    "a[href='/users/sign_out'], a.nav-link[href*='/u/']",
-                    timeout=PAGE_TIMEOUT_MS,
-                )
-                log.info("Backloggd login successful!")
+        if await _is_logged_in(page):
+            log.info("Already logged into Backloggd")
         else:
-            log.info("Please log into Backloggd in the browser window...")
-            await page.wait_for_selector(
-                "a[href='/users/sign_out'], a.nav-link[href*='/u/']",
-                timeout=LOGIN_TIMEOUT_MS,
-            )
-            log.info("Backloggd login successful!")
+            await _login(page, username, password)
 
         await page.close()
     finally:
@@ -134,29 +107,52 @@ async def search_and_add_to_wishlist(
 ) -> list[str]:
     """Search Backloggd for each game and add it to wishlist.
 
-    Automatically logs in if credentials are provided and not already logged in.
+    Handles login within the same browser context to avoid session issues.
     Returns list of game names that were successfully added.
     """
     if not game_names:
         return []
 
-    # Ensure logged in before starting
-    await ensure_backloggd_login(browser_data_dir, username, password)
-
     pw, context = await _launch_context(browser_data_dir, headless=False)
     succeeded: list[str] = []
     try:
         page = await context.new_page()
+
+        # Check login and log in if needed (same context)
+        await page.goto(BASE_URL, timeout=PAGE_TIMEOUT_MS)
+        await page.wait_for_load_state("domcontentloaded")
+        if not await _is_logged_in(page):
+            await _login(page, username, password)
+
+        # Dismiss cookie banner if present
+        try:
+            cookie_btn = await page.wait_for_selector(
+                "#cookie-banner-accept", timeout=3000
+            )
+            if cookie_btn:
+                await cookie_btn.click(force=True)
+                await asyncio.sleep(1)
+        except Exception:
+            pass
+
         for game_name in game_names:
             try:
-                success = await _add_single_game(page, game_name)
-                if success:
+                result = await _add_single_game(page, game_name)
+                if result == "added":
                     succeeded.append(game_name)
                     log.info("Added '%s' to Backloggd wishlist", game_name)
+                elif result == "already":
+                    log.info("'%s' already on Backloggd wishlist", game_name)
+                elif result == "not_found":
+                    log.warning("Game not found on Backloggd: '%s'", game_name)
                 else:
-                    log.warning("Could not add '%s' to Backloggd wishlist", game_name)
+                    log.warning(
+                        "Could not add '%s' to Backloggd wishlist", game_name
+                    )
             except Exception:
-                log.warning("Failed to add '%s' to Backloggd", game_name, exc_info=True)
+                log.warning(
+                    "Failed to add '%s' to Backloggd", game_name, exc_info=True
+                )
 
             await asyncio.sleep(delay)
 
@@ -168,76 +164,66 @@ async def search_and_add_to_wishlist(
     return succeeded
 
 
-async def _add_single_game(page, game_name: str) -> bool:
+async def _add_single_game(page: Page, game_name: str) -> str:
     """Search for a game on Backloggd and add it to wishlist.
 
-    Returns True if successfully added.
+    Returns:
+        "added" - successfully added to wishlist
+        "already" - already on wishlist
+        "not_found" - game not found in search results
+        "no_button" - game page found but no wishlist button
     """
     # Search for the game
     search_url = f"{BASE_URL}/search/games/{game_name}/"
     await page.goto(search_url, timeout=PAGE_TIMEOUT_MS)
-    await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_load_state("networkidle")
 
-    # Find the first game result and click into it
-    # Game cards use div.rating-hover with game links inside
-    first_result = await page.query_selector("div.rating-hover a, div.card-img a")
-    if not first_result:
-        # Try alternative selector — search results may use different structure
-        first_result = await page.query_selector("a[href*='/games/']")
+    # Find the first actual game result link (skip nav/library links)
+    game_links = await page.query_selector_all("a[href*='/games/']")
+    game_href = None
+    for link in game_links:
+        href = await link.get_attribute("href") or ""
+        # Skip navigation links
+        if "/games/lib/" in href or "/search/" in href:
+            continue
+        if href.startswith("/games/"):
+            game_href = href
+            break
 
-    if not first_result:
-        log.warning("No search results found for '%s'", game_name)
-        return False
-
-    href = await first_result.get_attribute("href")
-    if not href or "/games/" not in href:
-        log.warning("First result for '%s' doesn't look like a game link: %s", game_name, href)
-        return False
+    if not game_href:
+        return "not_found"
 
     # Navigate to the game page
-    game_url = href if href.startswith("http") else f"{BASE_URL}{href}"
-    await page.goto(game_url, timeout=PAGE_TIMEOUT_MS)
-    await page.wait_for_load_state("domcontentloaded")
+    await page.goto(f"{BASE_URL}{game_href}", timeout=PAGE_TIMEOUT_MS)
+    await page.wait_for_load_state("networkidle")
 
-    # Look for the wishlist button
-    # Backloggd uses status buttons — look for "Want to Play" or wishlist-related elements
-    # Try multiple selector strategies
+    # Find the visible Wishlist button
+    # Backloggd uses: button.button-link.btn-play inside a
+    # div.wishlist-btn-container. The parent has "btn-play-fill"
+    # class when the game is already on the wishlist.
+    wishlist_btns = await page.query_selector_all("button.button-link.btn-play")
+    for btn in wishlist_btns:
+        text = (await btn.inner_text()).strip()
+        if text != "Wishlist":
+            continue
+        if not await btn.is_visible():
+            continue
 
-    # Strategy 1: Look for a "Want to Play" or "Wishlist" button
-    wishlist_btn = await page.query_selector(
-        "button:has-text('Wishlist'), "
-        "button:has-text('Want to Play'), "
-        "a:has-text('Wishlist'), "
-        "a:has-text('Want to Play')"
-    )
-    if wishlist_btn:
-        await wishlist_btn.click()
-        await asyncio.sleep(1)
-        return True
+        # Check if already on wishlist via parent's class
+        parent_cls = await btn.evaluate("el => el.parentElement.className")
+        if "btn-play-fill" in parent_cls:
+            return "already"
 
-    # Strategy 2: Look for a status dropdown/selector and pick wishlist
-    status_btn = await page.query_selector(
-        "[data-target='#wishlistModal'], "
-        ".game-status-btn, "
-        "button[data-action*='wishlist'], "
-        "#wishlist-btn"
-    )
-    if status_btn:
-        await status_btn.click()
-        await asyncio.sleep(1)
-        return True
+        # Click to add to wishlist
+        await btn.click()
+        await asyncio.sleep(2)
 
-    # Strategy 3: Look for any button/link with wishlist in its attributes
-    wishlist_el = await page.query_selector("[class*='wishlist'], [id*='wishlist']")
-    if wishlist_el:
-        await wishlist_el.click()
-        await asyncio.sleep(1)
-        return True
+        # Verify it worked
+        parent_cls_after = await btn.evaluate("el => el.parentElement.className")
+        if "btn-play-fill" in parent_cls_after:
+            return "added"
 
-    log.warning(
-        "Could not find wishlist button on game page for '%s' at %s. "
-        "The Backloggd UI may have changed — please report this.",
-        game_name,
-        game_url,
-    )
-    return False
+        log.warning("Clicked wishlist button but state didn't change")
+        return "no_button"
+
+    return "no_button"
