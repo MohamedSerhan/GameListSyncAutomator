@@ -50,24 +50,75 @@ async def _is_logged_in(context: BrowserContext) -> bool:
         await page.close()
 
 
-async def ensure_backloggd_login(browser_data_dir: str) -> None:
-    """Open a visible browser for manual Backloggd login if not already logged in."""
-    pw, context = await _launch_context(browser_data_dir, headless=False)
+async def ensure_backloggd_login(
+    browser_data_dir: str,
+    username: str = "",
+    password: str = "",
+) -> None:
+    """Log into Backloggd automatically using credentials, or manually if not provided."""
+    pw, context = await _launch_context(browser_data_dir, headless=bool(username and password))
     try:
         if await _is_logged_in(context):
             log.info("Already logged into Backloggd")
             return
 
-        log.info("Please log into Backloggd in the browser window...")
         page = await context.new_page()
         await page.goto(LOGIN_URL, timeout=PAGE_TIMEOUT_MS)
+        await page.wait_for_load_state("domcontentloaded")
 
-        # Wait for login to complete — user dropdown or profile link appears
-        await page.wait_for_selector(
-            "a[href='/users/sign_out'], a.nav-link[href*='/u/']",
-            timeout=LOGIN_TIMEOUT_MS,
-        )
-        log.info("Backloggd login successful!")
+        if username and password:
+            log.info("Logging into Backloggd automatically...")
+            # Fill in the login form — Backloggd uses Devise (Rails)
+            # The email/username field and password field
+            email_field = await page.query_selector(
+                "input[name='user[email]'], "
+                "input[name='user[login]'], "
+                "input[type='email'], "
+                "input#user_email"
+            )
+            pass_field = await page.query_selector(
+                "input[name='user[password]'], "
+                "input[type='password'], "
+                "input#user_password"
+            )
+
+            if not email_field or not pass_field:
+                log.warning("Could not find login form fields, falling back to manual login")
+                await page.wait_for_selector(
+                    "a[href='/users/sign_out'], a.nav-link[href*='/u/']",
+                    timeout=LOGIN_TIMEOUT_MS,
+                )
+            else:
+                await email_field.fill(username)
+                await pass_field.fill(password)
+
+                # Click submit
+                submit_btn = await page.query_selector(
+                    "input[type='submit'], "
+                    "button[type='submit'], "
+                    "button:has-text('Log In'), "
+                    "input[value='Log In'], "
+                    "input[value='Log in']"
+                )
+                if submit_btn:
+                    await submit_btn.click()
+                else:
+                    await pass_field.press("Enter")
+
+                # Wait for login to complete
+                await page.wait_for_selector(
+                    "a[href='/users/sign_out'], a.nav-link[href*='/u/']",
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+                log.info("Backloggd login successful!")
+        else:
+            log.info("Please log into Backloggd in the browser window...")
+            await page.wait_for_selector(
+                "a[href='/users/sign_out'], a.nav-link[href*='/u/']",
+                timeout=LOGIN_TIMEOUT_MS,
+            )
+            log.info("Backloggd login successful!")
+
         await page.close()
     finally:
         await context.close()
@@ -77,14 +128,20 @@ async def ensure_backloggd_login(browser_data_dir: str) -> None:
 async def search_and_add_to_wishlist(
     browser_data_dir: str,
     game_names: list[str],
+    username: str = "",
+    password: str = "",
     delay: float = 3.0,
 ) -> list[str]:
     """Search Backloggd for each game and add it to wishlist.
 
+    Automatically logs in if credentials are provided and not already logged in.
     Returns list of game names that were successfully added.
     """
     if not game_names:
         return []
+
+    # Ensure logged in before starting
+    await ensure_backloggd_login(browser_data_dir, username, password)
 
     pw, context = await _launch_context(browser_data_dir, headless=False)
     succeeded: list[str] = []

@@ -97,7 +97,11 @@ def login(service: str) -> None:
         asyncio.run(ensure_steam_login(config.browser_data_dir))
     else:
         from .backloggd_browser import ensure_backloggd_login
-        asyncio.run(ensure_backloggd_login(config.backloggd_browser_data_dir))
+        asyncio.run(ensure_backloggd_login(
+            config.backloggd_browser_data_dir,
+            config.backloggd_username,
+            config.backloggd_password,
+        ))
 
 
 @main.command()
@@ -155,7 +159,11 @@ def sync_backloggd(dry_run: bool, force: bool) -> None:
     game_names = [m.steam_name for m in plan.steam_only if m.steam_name]
     added = asyncio.run(
         search_and_add_to_wishlist(
-            config.backloggd_browser_data_dir, game_names, config.rate_limit_delay
+            config.backloggd_browser_data_dir,
+            game_names,
+            config.backloggd_username,
+            config.backloggd_password,
+            config.rate_limit_delay,
         )
     )
     console.print(f"\n[green]Successfully added {len(added)}/{len(game_names)} games to Backloggd[/]")

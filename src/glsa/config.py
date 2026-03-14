@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 @dataclass
 class Config:
     backloggd_username: str
+    backloggd_password: str
     steam_api_key: str
     steam_id: str
     browser_data_dir: str = field(default_factory=lambda: str(Path.home() / ".glsa" / "browser-data"))
@@ -25,11 +26,14 @@ def load_config() -> Config:
 
     missing = []
     username = os.getenv("BACKLOGGD_USERNAME", "").strip()
+    password = os.getenv("BACKLOGGD_PASSWORD", "").strip()
     api_key = os.getenv("STEAM_API_KEY", "").strip()
     steam_id = os.getenv("STEAM_ID", "").strip()
 
     if not username:
         missing.append("BACKLOGGD_USERNAME")
+    if not password:
+        missing.append("BACKLOGGD_PASSWORD")
     if not api_key:
         missing.append("STEAM_API_KEY")
     if not steam_id:
@@ -42,6 +46,7 @@ def load_config() -> Config:
 
     config = Config(
         backloggd_username=username,
+        backloggd_password=password,
         steam_api_key=api_key,
         steam_id=steam_id,
     )
