@@ -28,6 +28,7 @@ class SyncPlan:
     already_synced: list[MatchResult] = field(default_factory=list)
     skipped: list[MatchResult] = field(default_factory=list)
     kept: list[MatchResult] = field(default_factory=list)
+    steam_only: list[MatchResult] = field(default_factory=list)  # On Steam but not on Backloggd
 
 
 def resolve_ambiguous_matches(
@@ -149,6 +150,15 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
         else:
             plan.to_add.append(m)
 
+    # Collect all Backloggd-matched app IDs (wishlist + done)
+    all_backloggd_app_ids: set[int] = set()
+    for m in wishlist_matches:
+        if m.matched and m.steam_app_id:
+            all_backloggd_app_ids.add(m.steam_app_id)
+    for m in done_matches:
+        if m.matched and m.steam_app_id:
+            all_backloggd_app_ids.add(m.steam_app_id)
+
     # Games to remove: on Steam wishlist AND in done list on Backloggd
     # BUT not if they're in the keep list
     for app_id, name in steam_wishlist.items():
@@ -169,6 +179,15 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
                     score=100,
                     matched=True,
                 ))
+        elif app_id not in all_backloggd_app_ids:
+            # On Steam wishlist but not tracked anywhere on Backloggd
+            plan.steam_only.append(MatchResult(
+                backloggd_name="",
+                steam_app_id=app_id,
+                steam_name=name,
+                score=0,
+                matched=False,
+            ))
 
     return plan
 
@@ -212,6 +231,20 @@ def display_sync_plan(plan: SyncPlan) -> None:
         for m in plan.unmatched:
             table.add_row(m.backloggd_name, m.steam_name or "-", str(m.score))
         console.print(table)
+
+    if plan.steam_only:
+        table = Table(title="Steam-only Games (not on Backloggd)", style="magenta")
+        table.add_column("Steam Game")
+        table.add_column("App ID")
+        table.add_column("Store URL")
+        for m in plan.steam_only:
+            table.add_row(
+                m.steam_name or "?",
+                str(m.steam_app_id),
+                f"store.steampowered.com/app/{m.steam_app_id}",
+            )
+        console.print(table)
+        console.print("[dim]These games are on your Steam wishlist but not tracked on Backloggd.[/]")
 
     if plan.skipped:
         console.print(

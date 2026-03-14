@@ -133,6 +133,7 @@ def status() -> None:
     console.print(f"  Kept (won't remove):              {len(plan.kept)}")
     console.print(f"  Skipped (not on Steam):            {len(plan.skipped)}")
     console.print(f"  Unmatched (no Steam match):        {len(plan.unmatched)}")
+    console.print(f"  Steam-only (not on Backloggd):     {len(plan.steam_only)}")
 
 
 @main.command(name="override")
