@@ -8,8 +8,9 @@ import click
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .config import load_config
+from .config import DEFAULT_DATA_DIR, load_config
 from .overrides import load_keep_list, load_overrides, save_keep_list, save_overrides
+from .secure_config import config_exists, encrypt_config, get_config_path
 from .steam_browser import ensure_steam_login
 from .sync import compute_sync_plan, display_sync_plan, execute_sync_plan
 
@@ -33,10 +34,10 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
     \b
     Quick start:
-      1. glsa setup            Install Playwright + create .env
-      2. Fill in .env          Add your Backloggd username, Steam API key, Steam ID
+      1. glsa setup            Install Playwright browser
+      2. glsa configure        Set up credentials (encrypted)
       3. glsa login steam      Log into Steam in the browser (one-time)
-      4. glsa login backloggd  Log into Backloggd in the browser (one-time)
+      4. glsa login backloggd  Log into Backloggd (auto with credentials)
       5. glsa sync --dry-run   Preview what would change
       6. glsa sync             Execute the sync (Backloggd -> Steam)
       7. glsa sync-backloggd   Add Steam-only wishlist games to Backloggd
@@ -55,7 +56,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 @main.command()
 def setup() -> None:
-    """Install Playwright browsers and create config template."""
+    """Install Playwright browsers and copy override/keep examples."""
     console.print("[bold]Installing Playwright Chromium...[/]")
     subprocess.run(
         [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -63,19 +64,8 @@ def setup() -> None:
     )
     console.print("[green]Playwright Chromium installed![/]")
 
-    env_example = Path(".env.example")
-    env_file = Path(".env")
-    if not env_file.exists() and env_example.exists():
-        env_file.write_text(env_example.read_text())
-        console.print("[green]Created .env from .env.example -- fill in your values![/]")
-    elif not env_file.exists():
-        console.print("[yellow]No .env.example found. Create a .env file manually.[/]")
-    else:
-        console.print("[dim].env already exists[/]")
-
     # Copy override/keep examples to ~/.glsa/ if they don't exist
-    config = load_config()
-    data_dir = Path(config.data_dir)
+    data_dir = Path(DEFAULT_DATA_DIR)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     for filename in ("overrides.json", "keep.json"):
@@ -86,6 +76,65 @@ def setup() -> None:
             console.print(f"[green]Created {target} from example[/]")
         elif not target.exists():
             console.print(f"[dim]No {filename} example found -- you can create {target} manually[/]")
+
+    if not config_exists(DEFAULT_DATA_DIR):
+        console.print("\n[yellow]No config found. Run `glsa configure` to set up your credentials.[/]")
+
+
+@main.command()
+def configure() -> None:
+    """Set up encrypted config with all credentials.
+
+    \b
+    Walks you through entering all required values, then encrypts
+    them with a master password and saves to ~/.glsa/config.enc.
+
+    To change your config, just run this command again.
+    Set GLSA_MASTER_PASSWORD env var to skip the password prompt.
+    """
+    config_path = get_config_path(DEFAULT_DATA_DIR)
+
+    if config_path.exists():
+        console.print("[yellow]Existing config found. This will replace it.[/]")
+        if not click.confirm("Continue?"):
+            console.print("[dim]Cancelled.[/]")
+            return
+
+    console.print("\n[bold]GLSA Configuration[/]\n")
+    console.print("Enter your credentials below. All values will be encrypted.\n")
+
+    backloggd_username = click.prompt("Backloggd username")
+    backloggd_password = click.prompt("Backloggd password", hide_input=True)
+    steam_api_key = click.prompt("Steam API key (get one at steamcommunity.com/dev/apikey)", hide_input=True)
+    steam_id = click.prompt("Steam ID (64-bit, find at steamid.io)")
+
+    console.print("\n[dim]Optional settings (press Enter to use defaults):[/]")
+    match_threshold = click.prompt("Match threshold", default=85, type=int)
+    rate_limit_delay = click.prompt("Rate limit delay (seconds)", default=2.0, type=float)
+
+    console.print("\n[bold]Set a master password to encrypt your config.[/]")
+    console.print("[dim]You'll need this password each time you run glsa.[/]")
+    console.print("[dim]Set GLSA_MASTER_PASSWORD env var to skip the prompt.[/]\n")
+
+    while True:
+        master_pw = click.prompt("Master password", hide_input=True)
+        confirm_pw = click.prompt("Confirm master password", hide_input=True)
+        if master_pw == confirm_pw:
+            break
+        console.print("[red]Passwords don't match. Try again.[/]")
+
+    data = {
+        "backloggd_username": backloggd_username,
+        "backloggd_password": backloggd_password,
+        "steam_api_key": steam_api_key,
+        "steam_id": steam_id,
+        "match_threshold": match_threshold,
+        "rate_limit_delay": rate_limit_delay,
+    }
+
+    encrypt_config(data, master_pw, config_path)
+    console.print(f"\n[green]Config saved to {config_path}[/]")
+    console.print("[dim]Run `glsa login steam` and `glsa login backloggd` next.[/]")
 
 
 @main.command()
