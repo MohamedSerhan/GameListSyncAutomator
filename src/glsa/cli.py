@@ -48,6 +48,12 @@ def main(ctx: click.Context, verbose: bool) -> None:
       glsa override "Orbitals" skip      Mark as not on Steam
       glsa keep 1601580                  Never remove from wishlist
       Edit ~/.glsa/overrides.json and ~/.glsa/keep.json directly
+
+    \b
+    Automation:
+      glsa schedule              Set up daily auto-sync via Task Scheduler
+      glsa schedule --time 14:00 Change the daily run time
+      glsa unschedule            Remove the scheduled task
     """
     _setup_logging(verbose)
     if ctx.invoked_subcommand is None:
@@ -312,3 +318,77 @@ def match(name: str) -> None:
         console.print(f"[green]Matched![/] {r.steam_name} (app ID: {r.steam_app_id}, score: {r.score}) {r.store_url}")
     else:
         console.print(f"[yellow]Best match:[/] {r.steam_name} (score: {r.score}, below threshold {config.match_threshold})")
+
+
+@main.command()
+@click.option("--time", "-t", default="09:00", help="Daily run time in HH:MM (24h). Default: 09:00")
+def schedule(time: str) -> None:
+    """Set up daily auto-sync via Windows Task Scheduler.
+
+    \b
+    Creates a scheduled task that runs both syncs daily:
+      - Backloggd -> Steam (glsa sync --force)
+      - Steam -> Backloggd (glsa sync-backloggd --force)
+
+    \b
+    The task runs even if your PC was off at the scheduled time
+    (it catches up as soon as you're back online).
+
+    \b
+    Requirements:
+      - GLSA_MASTER_PASSWORD must be set as a system/user env var
+      - Steam and Backloggd must be logged in (sessions persist)
+
+    \b
+    Examples:
+      glsa schedule              Run daily at 09:00 (default)
+      glsa schedule --time 14:00 Run daily at 2pm
+    """
+    from .scheduler import create_scheduled_task, get_task_status
+
+    # Validate time format
+    try:
+        h, m = time.split(":")
+        if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+            raise ValueError
+    except (ValueError, AttributeError):
+        console.print(f"[red]Invalid time format:[/] {time} -- use HH:MM (e.g. 09:00, 14:30)")
+        raise SystemExit(1)
+
+    # Check GLSA_MASTER_PASSWORD is set
+    import os
+    if not os.getenv("GLSA_MASTER_PASSWORD"):
+        console.print("[yellow]Warning:[/] GLSA_MASTER_PASSWORD env var is not set.")
+        console.print("The scheduled task needs it to decrypt your config.")
+        console.print("Set it as a permanent user env var:")
+        console.print('  [dim]setx GLSA_MASTER_PASSWORD "your_password"[/]')
+        if not click.confirm("\nContinue anyway?"):
+            return
+
+    success, msg = create_scheduled_task(time)
+    if success:
+        console.print(f"[green]{msg}[/]")
+        console.print("\n[dim]The task will:[/]")
+        console.print("  - Run daily, catching up if your PC was off")
+        console.print("  - Only run when connected to the internet")
+        console.print("  - Time out after 1 hour")
+        console.print("\n[dim]View in Task Scheduler or run: schtasks /Query /TN GLSA_DailySyncBackloggdToSteam[/]")
+
+        # Show current status
+        exists, info = get_task_status()
+        if exists and info:
+            console.print(f"\n  Next run: {info.get('Next Run Time', 'unknown')}")
+    else:
+        console.print(f"[red]{msg}[/]")
+
+
+@main.command()
+def unschedule() -> None:
+    """Remove the daily auto-sync scheduled task."""
+    from .scheduler import delete_scheduled_task
+
+    success, msg = delete_scheduled_task()
+    if success:
+        console.print(f"[green]{msg}[/]")
+    else:
+        console.print(f"[yellow]{msg}[/]")
