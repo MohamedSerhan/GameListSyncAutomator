@@ -12,6 +12,7 @@ class Config:
     steam_api_key: str
     steam_id: str
     browser_data_dir: str = field(default_factory=lambda: str(Path.home() / ".glsa" / "browser-data"))
+    backloggd_browser_data_dir: str = field(default_factory=lambda: str(Path.home() / ".glsa" / "browser-data-backloggd"))
     cache_dir: str = field(default_factory=lambda: str(Path.home() / ".glsa" / "cache"))
     data_dir: str = field(default_factory=lambda: str(Path.home() / ".glsa"))
     match_threshold: int = 85

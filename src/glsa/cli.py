@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import subprocess
 import sys
@@ -30,15 +29,17 @@ def _setup_logging(verbose: bool) -> None:
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
 @click.pass_context
 def main(ctx: click.Context, verbose: bool) -> None:
-    """GLSA — Sync your Backloggd wishlist to Steam.
+    """GLSA -- Sync your Backloggd wishlist to Steam.
 
     \b
     Quick start:
-      1. glsa setup          Install Playwright + create .env
-      2. Fill in .env        Add your Backloggd username, Steam API key, Steam ID
-      3. glsa login          Log into Steam in the browser (one-time)
-      4. glsa sync --dry-run Preview what would change
-      5. glsa sync           Execute the sync
+      1. glsa setup            Install Playwright + create .env
+      2. Fill in .env          Add your Backloggd username, Steam API key, Steam ID
+      3. glsa login steam      Log into Steam in the browser (one-time)
+      4. glsa login backloggd  Log into Backloggd in the browser (one-time)
+      5. glsa sync --dry-run   Preview what would change
+      6. glsa sync             Execute the sync (Backloggd -> Steam)
+      7. glsa sync-backloggd   Add Steam-only wishlist games to Backloggd
 
     \b
     Fine-tuning matches:
@@ -66,7 +67,7 @@ def setup() -> None:
     env_file = Path(".env")
     if not env_file.exists() and env_example.exists():
         env_file.write_text(env_example.read_text())
-        console.print("[green]Created .env from .env.example — fill in your values![/]")
+        console.print("[green]Created .env from .env.example -- fill in your values![/]")
     elif not env_file.exists():
         console.print("[yellow]No .env.example found. Create a .env file manually.[/]")
     else:
@@ -84,14 +85,19 @@ def setup() -> None:
             target.write_text(example.read_text())
             console.print(f"[green]Created {target} from example[/]")
         elif not target.exists():
-            console.print(f"[dim]No {filename} example found — you can create {target} manually[/]")
+            console.print(f"[dim]No {filename} example found -- you can create {target} manually[/]")
 
 
 @main.command()
-def login() -> None:
-    """Open browser for Steam login."""
+@click.argument("service", type=click.Choice(["steam", "backloggd"]))
+def login(service: str) -> None:
+    """Open browser to log into a service (steam or backloggd)."""
     config = load_config()
-    asyncio.run(ensure_steam_login(config.browser_data_dir))
+    if service == "steam":
+        asyncio.run(ensure_steam_login(config.browser_data_dir))
+    else:
+        from .backloggd_browser import ensure_backloggd_login
+        asyncio.run(ensure_backloggd_login(config.backloggd_browser_data_dir))
 
 
 @main.command()
@@ -108,7 +114,7 @@ def sync(dry_run: bool, no_remove: bool, force: bool) -> None:
         return
 
     if dry_run:
-        console.print("\n[dim]Dry run — no changes made.[/]")
+        console.print("\n[dim]Dry run -- no changes made.[/]")
         return
 
     if not force:
@@ -117,6 +123,42 @@ def sync(dry_run: bool, no_remove: bool, force: bool) -> None:
             return
 
     execute_sync_plan(plan, config, no_remove=no_remove)
+
+
+@main.command(name="sync-backloggd")
+@click.option("--dry-run", is_flag=True, help="Show what would be added without doing it")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
+def sync_backloggd(dry_run: bool, force: bool) -> None:
+    """Add Steam-only wishlist games to Backloggd wishlist."""
+    from .backloggd_browser import search_and_add_to_wishlist
+
+    config = load_config()
+    plan = compute_sync_plan(config)
+
+    if not plan.steam_only:
+        console.print("[bold green]No Steam-only games to add to Backloggd![/]")
+        return
+
+    console.print(f"\n[bold]Found {len(plan.steam_only)} Steam-only games to add to Backloggd:[/]")
+    for m in plan.steam_only:
+        console.print(f"  - {m.steam_name} (app {m.steam_app_id})")
+
+    if dry_run:
+        console.print("\n[dim]Dry run -- no changes made.[/]")
+        return
+
+    if not force:
+        if not click.confirm(f"\nAdd {len(plan.steam_only)} games to Backloggd wishlist?"):
+            console.print("[dim]Cancelled.[/]")
+            return
+
+    game_names = [m.steam_name for m in plan.steam_only if m.steam_name]
+    added = asyncio.run(
+        search_and_add_to_wishlist(
+            config.backloggd_browser_data_dir, game_names, config.rate_limit_delay
+        )
+    )
+    console.print(f"\n[green]Successfully added {len(added)}/{len(game_names)} games to Backloggd[/]")
 
 
 @main.command()
@@ -163,7 +205,7 @@ def override_cmd(game_name: str, value: str) -> None:
         try:
             app_id = int(value)
         except ValueError:
-            console.print(f"[red]Invalid value:[/] {value} — must be a Steam app ID or 'skip'")
+            console.print(f"[red]Invalid value:[/] {value} -- must be a Steam app ID or 'skip'")
             raise SystemExit(1)
         overrides[game_name] = app_id
         save_overrides(config.data_dir, overrides)
