@@ -77,6 +77,13 @@ def _generate_variants(name: str) -> list[str]:
         if combined != normalized:
             variants.append(combined)
 
+        # Also try just the base part (before the separator) — helps when a subtitle
+        # prevents matching the base game name on Steam.
+        # e.g. "Unbeatable: White Label" → also try "unbeatable"
+        base = _normalize(parts[0])
+        if base not in variants and len(base) >= 4:
+            variants.append(base)
+
     return variants
 
 
@@ -85,9 +92,15 @@ def match_games(
     steam_apps: dict[str, list[int]],
     threshold: int = 85,
     overrides: dict[str, int | None] | None = None,
+    progress=None,
     progress_description: str | None = None,
 ) -> list[MatchResult]:
-    """Match Backloggd game names to Steam app IDs using fuzzy matching."""
+    """Match Backloggd game names to Steam app IDs using fuzzy matching.
+
+    progress: an active rich.progress.Progress instance (optional).
+              When provided, a sub-task is added for this batch of games.
+    progress_description: label shown on the progress bar.
+    """
     overrides = overrides or {}
     steam_names_list = list(steam_apps.keys())
     # Reverse map for looking up names by app ID
@@ -96,14 +109,13 @@ def match_games(
         for app_id in app_ids:
             id_to_name[app_id] = name
 
-    if progress_description:
-        from rich.progress import track
-        iterable = track(backloggd_names, description=progress_description, transient=True)
-    else:
-        iterable = iter(backloggd_names)
+    # Set up progress tracking
+    _task = None
+    if progress is not None and progress_description:
+        _task = progress.add_task(progress_description, total=len(backloggd_names))
 
     results: list[MatchResult] = []
-    for bg_name in iterable:
+    for bg_name in backloggd_names:
         # Check overrides first (case-insensitive lookup)
         override_val = _lookup_override(bg_name, overrides)
         if override_val is not None:
@@ -181,6 +193,9 @@ def match_games(
                 score=score,
                 matched=False,
             ))
+
+        if _task is not None:
+            progress.advance(_task)
 
     return results
 

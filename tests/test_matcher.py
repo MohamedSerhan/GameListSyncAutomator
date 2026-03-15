@@ -170,6 +170,23 @@ class TestGenerateVariants:
         variants = _generate_variants("Halo: GOTY")
         assert "halo" in variants
 
+    def test_base_name_added_as_variant(self):
+        """'Unbeatable: White Label' should also generate 'unbeatable' as a variant."""
+        variants = _generate_variants("Unbeatable: White Label")
+        assert "unbeatable" in variants
+        assert "unbeatable white label" in variants
+
+    def test_base_name_too_short_not_added(self):
+        # Base name shorter than 4 chars should not be added (too broad to be useful)
+        variants = _generate_variants("The: Full Subtitle Here")
+        assert "the" not in variants
+
+    def test_base_name_not_duplicated_when_same_as_full(self):
+        # "Celeste: Something" → base "celeste" differs from full "celeste something"
+        # so "celeste" IS added. But it should appear only once.
+        variants = _generate_variants("Celeste: Something")
+        assert variants.count("celeste") == 1
+
 
 # ---------------------------------------------------------------------------
 # _lookup_override
@@ -299,6 +316,22 @@ class TestMatchGamesEditions:
         apps = _apps(("cyberpunk 2077", 1091500))
         results = match_games(["Cyberpunk 2077 Deluxe Edition"], apps, threshold=85)
         assert results[0].matched is True
+
+    def test_subtitle_game_matches_steam_base_name(self):
+        """'Unbeatable: White Label' should match 'unbeatable' via the base-name variant."""
+        apps = _apps(("unbeatable", 1290490))
+        results = match_games(["Unbeatable: White Label"], apps, threshold=85)
+        assert results[0].matched is True
+        assert results[0].steam_app_id == 1290490
+
+    def test_subtitle_game_prefers_full_match_over_base(self):
+        """If the full name matches better than the base, use the full match."""
+        apps = _apps(
+            ("unbeatable white label", 1290490),
+            ("unbeatable something else", 9999),
+        )
+        results = match_games(["Unbeatable: White Label"], apps, threshold=85)
+        assert results[0].steam_app_id == 1290490
 
 
 # ---------------------------------------------------------------------------

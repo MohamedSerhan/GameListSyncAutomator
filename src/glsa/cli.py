@@ -177,6 +177,14 @@ def sync(dry_run: bool, no_remove: bool, force: bool, with_backloggd: bool) -> N
     if not has_steam_changes and not has_backloggd_changes:
         return
 
+    # display_sync_plan says "Everything is in sync!" when to_add/to_remove are empty.
+    # If we still have backloggd work queued, clarify that we're about to do that.
+    if has_backloggd_changes and not has_steam_changes:
+        console.print(
+            f"\n[dim]Steam wishlist is in sync — will push "
+            f"{len(plan.steam_only)} Steam-only game(s) to Backloggd.[/]"
+        )
+
     if dry_run:
         console.print("\n[dim]Dry run -- no changes made.[/]")
         return
