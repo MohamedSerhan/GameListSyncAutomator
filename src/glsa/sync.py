@@ -94,34 +94,31 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
     if keep_ids:
         console.print(f"[dim]Loaded {len(keep_ids)} keep-list entries[/]")
 
-    console.print("[bold]Fetching Backloggd wishlist...[/]")
+    console.print("[bold]Backloggd[/]")
     wishlist_names = get_backloggd_games(config.backloggd_username, "wishlist")
-    console.print(f"  Found {len(wishlist_names)} wishlist games")
-
-    console.print("[bold]Fetching Backloggd played/backlog/playing...[/]")
+    console.print(f"  Wishlist:  {len(wishlist_names)} games")
     done_names: list[str] = []
     for status in ("played", "backlog", "playing"):
         try:
             names = get_backloggd_games(config.backloggd_username, status)
             done_names.extend(names)
-            console.print(f"  Found {len(names)} {status} games")
+            console.print(f"  {status.capitalize():<9} {len(names)} games")
         except ValueError:
-            console.print(f"  No {status} games found")
+            console.print(f"  {status.capitalize():<9} none")
     done_names = list(set(done_names))
 
-    console.print("[bold]Fetching Steam wishlist...[/]")
+    console.print()
+    console.print("[bold]Steam[/]")
     steam_wishlist = get_steam_wishlist(config.steam_api_key, config.steam_id)
-    console.print(f"  Found {len(steam_wishlist)} games on Steam wishlist")
-
-    console.print("[bold]Loading Steam app list...[/]")
+    console.print(f"  Wishlist:  {len(steam_wishlist)} games")
     steam_apps = get_steam_app_list(config.cache_dir, config.steam_api_key)
-    console.print(f"  Loaded {len(steam_apps)} Steam apps")
-
+    console.print(f"  App list:  {len(steam_apps)} apps")
     steam_wishlist = fill_wishlist_names(steam_wishlist, steam_apps)
     steam_wishlist_ids = set(steam_wishlist.keys())
 
+    console.print()
     total_to_match = len(wishlist_names) + len(done_names)
-    console.print(f"[bold]Matching {total_to_match} games...[/]")
+    console.print(f"[bold]Matching[/] ({total_to_match} games)")
     with Progress(
         SpinnerColumn(),
         TextColumn("{task.description}"),
