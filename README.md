@@ -56,8 +56,7 @@ Sessions persist in the browser data directory, so you only do this once.
 ### 4. Test
 
 ```bash
-glsa sync --dry-run          # Preview Backloggd → Steam changes
-glsa sync-backloggd --dry-run # Preview Steam-only games to add to Backloggd
+glsa sync --with-backloggd --dry-run  # Preview both directions at once
 ```
 
 ### 5. Enable Automation
@@ -74,10 +73,14 @@ Done! Both syncs run silently every day.
 ### Manual Syncing
 
 ```bash
-glsa sync                 # Sync Backloggd to Steam (with confirmation)
-glsa sync --force         # Skip confirmation
-glsa sync --no-remove     # Only add games, never remove
-glsa sync-backloggd       # Add Steam-only games to Backloggd
+glsa sync --with-backloggd        # Sync both directions (recommended)
+glsa sync --with-backloggd -f     # Skip confirmation
+glsa sync --with-backloggd --dry-run  # Preview changes without applying
+
+# Individual directions
+glsa sync                 # Backloggd → Steam only
+glsa sync --no-remove     # Backloggd → Steam, only add (never remove)
+glsa sync-backloggd       # Steam → Backloggd only
 ```
 
 ### View Status
@@ -116,21 +119,26 @@ View logs in Windows Task Scheduler or check `~/.glsa/sync.log`.
 
 ## How It Works
 
-### Backloggd → Steam (`glsa sync`)
+### `glsa sync --with-backloggd`
 
-1. Fetches your Backloggd wishlist
-2. Fetches your Backloggd played/backlog/playing lists
-3. Fetches your Steam wishlist
-4. Fuzzy-matches games by name to Steam app IDs
-5. Adds matching Backloggd wishlist games to Steam
-6. Removes games from Steam if they're in your Backloggd played/backlog/playing lists
-7. Respects your keep list (never removes those games)
+Runs both directions in a single pass using one shared data fetch:
 
-### Steam → Backloggd (`glsa sync-backloggd`)
+**Backloggd → Steam**
+1. Fetches your Backloggd wishlist and played/backlog/playing lists
+2. Fetches your Steam wishlist and the full Steam app catalogue
+3. Fuzzy-matches games by name to Steam app IDs
+4. Adds matching Backloggd wishlist games to your Steam wishlist
+5. Removes games from Steam if they appear in your Backloggd played/backlog/playing lists
+6. Respects your keep list (never removes those games)
 
-1. Finds games on your Steam wishlist that aren't tracked on Backloggd
-2. Searches Backloggd for each game
-3. Automatically adds them to your Backloggd wishlist
+**Steam → Backloggd** (same fetch, no extra network calls)
+7. Finds games on your Steam wishlist that aren't tracked anywhere on Backloggd
+8. Searches Backloggd for each game and adds them to your Backloggd wishlist
+
+### Running directions separately
+
+`glsa sync` runs only the Backloggd → Steam half.
+`glsa sync-backloggd` runs only the Steam → Backloggd half (fetches data independently).
 
 ## Configuration
 
