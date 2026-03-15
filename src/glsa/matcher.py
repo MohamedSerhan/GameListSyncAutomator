@@ -35,8 +35,20 @@ _STRIP_PATTERNS = re.compile(
 _NON_ALNUM = re.compile(r"[^\w\s]")
 _MULTI_SPACE = re.compile(r"\s+")
 
+# Pattern to detect sequel/prequel indicators (e.g., "2", "3", "II", "III", etc.)
+_SEQUEL_PATTERN = re.compile(
+    r"\b(2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii|ix)\b",
+    re.IGNORECASE,
+)
+
 # Pattern for "Base Game: DLC/Subtitle" or "Base Game - DLC/Subtitle"
 _DLC_SPLIT = re.compile(r"\s*[:.\u2013\u2014-]\s+")
+
+
+def _extract_sequel_indicator(name: str) -> str | None:
+    """Extract any sequel/prequel indicator from a game name (e.g., '2', 'III')."""
+    match = _SEQUEL_PATTERN.search(name)
+    return match.group(1) if match else None
 
 
 def _normalize(name: str) -> str:
@@ -109,6 +121,8 @@ def match_games(
         # Try fuzzy matching with name variants
         best_match = None
         best_score = 0
+        bg_sequel = _extract_sequel_indicator(bg_name)
+
         for variant in _generate_variants(bg_name):
             match = process.extractOne(
                 variant,
@@ -117,6 +131,15 @@ def match_games(
                 score_cutoff=0,
             )
             if match and match[1] > best_score:
+                steam_name = match[0]
+                steam_sequel = _extract_sequel_indicator(steam_name)
+
+                # Prevent matching across different sequel/prequel versions.
+                # Only accept matches where sequel indicators match exactly.
+                # This prevents "Monument Valley 3" from matching to "Monument Valley" or "Monument Valley 2"
+                if bg_sequel != steam_sequel:
+                    continue
+
                 best_match = match
                 best_score = match[1]
 
