@@ -163,13 +163,18 @@ def login(service: str) -> None:
 @click.option("--dry-run", is_flag=True, help="Show what would change without doing it")
 @click.option("--no-remove", is_flag=True, help="Only add games, never remove from Steam")
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
-def sync(dry_run: bool, no_remove: bool, force: bool) -> None:
+@click.option("--with-backloggd", "-b", is_flag=True,
+              help="Also sync Steam-only games back to Backloggd (reuses the same plan)")
+def sync(dry_run: bool, no_remove: bool, force: bool, with_backloggd: bool) -> None:
     """Sync Backloggd wishlist to Steam wishlist."""
     config = load_config()
     plan = compute_sync_plan(config)
     display_sync_plan(plan)
 
-    if not plan.to_add and not plan.to_remove:
+    has_steam_changes = bool(plan.to_add or plan.to_remove)
+    has_backloggd_changes = with_backloggd and bool(plan.steam_only)
+
+    if not has_steam_changes and not has_backloggd_changes:
         return
 
     if dry_run:
@@ -181,7 +186,30 @@ def sync(dry_run: bool, no_remove: bool, force: bool) -> None:
             console.print("[dim]Cancelled.[/]")
             return
 
-    execute_sync_plan(plan, config, no_remove=no_remove)
+    if has_steam_changes:
+        execute_sync_plan(plan, config, no_remove=no_remove)
+
+    if has_backloggd_changes:
+        _sync_backloggd_from_plan(plan, config)
+
+
+def _sync_backloggd_from_plan(plan, config) -> None:
+    """Execute the Steam → Backloggd half of a sync using an already-computed plan."""
+    from .backloggd_browser import search_and_add_to_wishlist
+    from .sync import SyncPlan
+
+    game_names = [m.steam_name for m in plan.steam_only if m.steam_name]
+    console.print(f"\n[bold]Adding {len(game_names)} Steam-only games to Backloggd...[/]")
+    added = asyncio.run(
+        search_and_add_to_wishlist(
+            config.backloggd_browser_data_dir,
+            game_names,
+            config.backloggd_username,
+            config.backloggd_password,
+            config.rate_limit_delay,
+        )
+    )
+    console.print(f"[green]Successfully added {len(added)}/{len(game_names)} games to Backloggd[/]")
 
 
 @main.command(name="sync-backloggd")
@@ -189,8 +217,6 @@ def sync(dry_run: bool, no_remove: bool, force: bool) -> None:
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
 def sync_backloggd(dry_run: bool, force: bool) -> None:
     """Add Steam-only wishlist games to Backloggd wishlist."""
-    from .backloggd_browser import search_and_add_to_wishlist
-
     config = load_config()
     plan = compute_sync_plan(config)
 
@@ -211,17 +237,7 @@ def sync_backloggd(dry_run: bool, force: bool) -> None:
             console.print("[dim]Cancelled.[/]")
             return
 
-    game_names = [m.steam_name for m in plan.steam_only if m.steam_name]
-    added = asyncio.run(
-        search_and_add_to_wishlist(
-            config.backloggd_browser_data_dir,
-            game_names,
-            config.backloggd_username,
-            config.backloggd_password,
-            config.rate_limit_delay,
-        )
-    )
-    console.print(f"\n[green]Successfully added {len(added)}/{len(game_names)} games to Backloggd[/]")
+    _sync_backloggd_from_plan(plan, config)
 
 
 @main.command()

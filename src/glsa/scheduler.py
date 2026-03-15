@@ -28,8 +28,7 @@ def _build_batch_script() -> Path:
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(
         f'@echo off\r\n'
-        f'{glsa} sync --force\r\n'
-        f'{glsa} sync-backloggd --force\r\n',
+        f'{glsa} sync --force --with-backloggd\r\n',
         encoding="utf-8",
     )
     return script_path

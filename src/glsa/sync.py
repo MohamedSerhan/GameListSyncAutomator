@@ -9,6 +9,8 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from rapidfuzz import fuzz
+
 from .backloggd import get_backloggd_games
 from .config import Config
 from .matcher import STORE_URL, MatchResult, match_games
@@ -118,12 +120,13 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
     steam_wishlist = fill_wishlist_names(steam_wishlist, steam_apps)
     steam_wishlist_ids = set(steam_wishlist.keys())
 
-    console.print("[bold]Matching games...[/]")
     wishlist_matches = match_games(
-        wishlist_names, steam_apps, config.match_threshold, overrides
+        wishlist_names, steam_apps, config.match_threshold, overrides,
+        progress_description=f"Matching {len(wishlist_names)} wishlist games...",
     )
     done_matches = match_games(
-        done_names, steam_apps, config.match_threshold, overrides
+        done_names, steam_apps, config.match_threshold, overrides,
+        progress_description=f"Matching {len(done_names)} played/backlog games...",
     )
 
     # Resolve ambiguous matches interactively before building the plan
@@ -159,10 +162,8 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
         if m.matched and m.steam_app_id:
             all_backloggd_app_ids.add(m.steam_app_id)
 
-    # Also build a set of all Backloggd game names (normalized) for fallback matching
-    all_backloggd_names: set[str] = set()
-    for name in wishlist_names + done_names:
-        all_backloggd_names.add(name.strip().lower())
+    # Also build a list of all Backloggd game names (normalized) for fallback fuzzy matching
+    all_backloggd_names_list: list[str] = [name.strip().lower() for name in wishlist_names + done_names]
 
     # Games to remove: on Steam wishlist AND in done list on Backloggd
     # BUT not if they're in the keep list
@@ -188,9 +189,14 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
             # Skip "Unknown" games (not in Steam app list — delisted/unreleased)
             if name.startswith("Unknown ("):
                 continue
-            # Also skip if the Steam name already matches a Backloggd game name
-            # (handles cases where fuzzy matching couldn't find the app ID)
-            if name.strip().lower() in all_backloggd_names:
+            # Also skip if the Steam name fuzzy-matches a Backloggd game name
+            # (handles cases where fuzzy matching couldn't find the app ID, or names differ slightly)
+            steam_name_normalized = name.strip().lower()
+            best_match_score = max(
+                (fuzz.token_sort_ratio(steam_name_normalized, bg_name) for bg_name in all_backloggd_names_list),
+                default=0
+            )
+            if best_match_score >= 80:
                 continue
             # On Steam wishlist but not tracked anywhere on Backloggd
             plan.steam_only.append(MatchResult(

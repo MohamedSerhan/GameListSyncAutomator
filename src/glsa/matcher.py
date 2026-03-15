@@ -35,20 +35,25 @@ _STRIP_PATTERNS = re.compile(
 _NON_ALNUM = re.compile(r"[^\w\s]")
 _MULTI_SPACE = re.compile(r"\s+")
 
-# Pattern to detect sequel/prequel indicators (e.g., "2", "3", "II", "III", etc.)
-_SEQUEL_PATTERN = re.compile(
-    r"\b(2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii|ix)\b",
-    re.IGNORECASE,
-)
-
 # Pattern for "Base Game: DLC/Subtitle" or "Base Game - DLC/Subtitle"
 _DLC_SPLIT = re.compile(r"\s*[:.\u2013\u2014-]\s+")
 
+# Pattern to detect sequel/prequel indicators: trailing numbers (2-9) or roman numerals
+# Matches "Game 2", "Game II", "Game: Part III", etc.
+_SEQUEL_PATTERN = re.compile(
+    r"\b(2|3|4|5|6|7|8|9|ii|iii|iv|v|vi|vii|viii|ix|x)\b\s*$",
+    re.IGNORECASE,
+)
 
-def _extract_sequel_indicator(name: str) -> str | None:
-    """Extract any sequel/prequel indicator from a game name (e.g., '2', 'III')."""
+
+def _extract_sequel_number(name: str) -> str | None:
+    """Extract trailing sequel/prequel number from a game name.
+
+    Returns the number/roman numeral if found (e.g., '2', 'III', '4'),
+    or None if the name doesn't end with a sequel indicator.
+    """
     match = _SEQUEL_PATTERN.search(name)
-    return match.group(1) if match else None
+    return match.group(1).lower() if match else None
 
 
 def _normalize(name: str) -> str:
@@ -80,6 +85,7 @@ def match_games(
     steam_apps: dict[str, list[int]],
     threshold: int = 85,
     overrides: dict[str, int | None] | None = None,
+    progress_description: str | None = None,
 ) -> list[MatchResult]:
     """Match Backloggd game names to Steam app IDs using fuzzy matching."""
     overrides = overrides or {}
@@ -90,8 +96,14 @@ def match_games(
         for app_id in app_ids:
             id_to_name[app_id] = name
 
+    if progress_description:
+        from rich.progress import track
+        iterable = track(backloggd_names, description=progress_description, transient=True)
+    else:
+        iterable = iter(backloggd_names)
+
     results: list[MatchResult] = []
-    for bg_name in backloggd_names:
+    for bg_name in iterable:
         # Check overrides first (case-insensitive lookup)
         override_val = _lookup_override(bg_name, overrides)
         if override_val is not None:
@@ -121,7 +133,7 @@ def match_games(
         # Try fuzzy matching with name variants
         best_match = None
         best_score = 0
-        bg_sequel = _extract_sequel_indicator(bg_name)
+        bg_sequel = _extract_sequel_number(bg_name)
 
         for variant in _generate_variants(bg_name):
             match = process.extractOne(
@@ -132,12 +144,15 @@ def match_games(
             )
             if match and match[1] > best_score:
                 steam_name = match[0]
-                steam_sequel = _extract_sequel_indicator(steam_name)
+                steam_sequel = _extract_sequel_number(steam_name)
 
-                # Prevent matching across different sequel/prequel versions.
-                # Only accept matches where sequel indicators match exactly.
-                # This prevents "Monument Valley 3" from matching to "Monument Valley" or "Monument Valley 2"
-                if bg_sequel != steam_sequel:
+                # If Backloggd game has a clear sequel/prequel indicator (e.g., "3"),
+                # only accept matches where the Steam game has the same indicator.
+                # This prevents "Monument Valley 3" from matching to "Monument Valley"
+                # or "Monument Valley 2".
+                if bg_sequel and bg_sequel != steam_sequel:
+                    # Penalize mismatched sequels heavily to deprioritize them
+                    best_score = max(best_score, match[1] - 20)
                     continue
 
                 best_match = match
