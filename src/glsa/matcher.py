@@ -77,13 +77,6 @@ def _generate_variants(name: str) -> list[str]:
         if combined != normalized:
             variants.append(combined)
 
-        # Also try just the base part (before the separator) — helps when a subtitle
-        # prevents matching the base game name on Steam.
-        # e.g. "Unbeatable: White Label" → also try "unbeatable"
-        base = _normalize(parts[0])
-        if base not in variants and len(base) >= 4:
-            variants.append(base)
-
     return variants
 
 
