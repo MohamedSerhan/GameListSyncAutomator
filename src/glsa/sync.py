@@ -7,7 +7,7 @@ from pathlib import Path
 
 import click
 from rich.console import Console
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from rapidfuzz import fuzz
@@ -94,63 +94,55 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
     if keep_ids:
         console.print(f"[dim]Loaded {len(keep_ids)} keep-list entries[/]")
 
+    console.print("[bold]Fetching Backloggd wishlist...[/]")
+    wishlist_names = get_backloggd_games(config.backloggd_username, "wishlist")
+    console.print(f"  Found {len(wishlist_names)} wishlist games")
+
+    console.print("[bold]Fetching Backloggd played/backlog/playing...[/]")
+    done_names: list[str] = []
+    for status in ("played", "backlog", "playing"):
+        try:
+            names = get_backloggd_games(config.backloggd_username, status)
+            done_names.extend(names)
+            console.print(f"  Found {len(names)} {status} games")
+        except ValueError:
+            console.print(f"  No {status} games found")
+    done_names = list(set(done_names))
+
+    console.print("[bold]Fetching Steam wishlist...[/]")
+    steam_wishlist = get_steam_wishlist(config.steam_api_key, config.steam_id)
+    console.print(f"  Found {len(steam_wishlist)} games on Steam wishlist")
+
+    console.print("[bold]Loading Steam app list...[/]")
+    steam_apps = get_steam_app_list(config.cache_dir, config.steam_api_key)
+    console.print(f"  Loaded {len(steam_apps)} Steam apps")
+
+    steam_wishlist = fill_wishlist_names(steam_wishlist, steam_apps)
+    steam_wishlist_ids = set(steam_wishlist.keys())
+
+    total_to_match = len(wishlist_names) + len(done_names)
+    console.print(f"[bold]Matching {total_to_match} games...[/]")
     with Progress(
         SpinnerColumn(),
-        TextColumn("[bold]{task.description}"),
+        TextColumn("{task.description}"),
         BarColumn(),
         MofNCompleteColumn(),
-        TimeElapsedColumn(),
         console=console,
         transient=True,
     ) as progress:
-        overall = progress.add_task("Syncing", total=5)
-
-        # Step 1 — Backloggd wishlist
-        progress.update(overall, description="[1/5] Fetching Backloggd wishlist")
-        wishlist_names = get_backloggd_games(config.backloggd_username, "wishlist")
-        progress.console.print(f"  [dim]Wishlist: {len(wishlist_names)} games[/]")
-        progress.advance(overall)
-
-        # Step 2 — Backloggd played/backlog/playing
-        progress.update(overall, description="[2/5] Fetching Backloggd played lists")
-        done_names: list[str] = []
-        for status in ("played", "backlog", "playing"):
-            try:
-                names = get_backloggd_games(config.backloggd_username, status)
-                done_names.extend(names)
-                progress.console.print(f"  [dim]{status.capitalize()}: {len(names)} games[/]")
-            except ValueError:
-                progress.console.print(f"  [dim]No {status} games found[/]")
-        done_names = list(set(done_names))
-        progress.advance(overall)
-
-        # Step 3 — Steam wishlist + app list
-        progress.update(overall, description="[3/5] Fetching Steam data")
-        steam_wishlist = get_steam_wishlist(config.steam_api_key, config.steam_id)
-        progress.console.print(f"  [dim]Steam wishlist: {len(steam_wishlist)} games[/]")
-        steam_apps = get_steam_app_list(config.cache_dir, config.steam_api_key)
-        progress.console.print(f"  [dim]Steam app list: {len(steam_apps)} apps[/]")
-        steam_wishlist = fill_wishlist_names(steam_wishlist, steam_apps)
-        steam_wishlist_ids = set(steam_wishlist.keys())
-        progress.advance(overall)
-
-        # Step 4 — Match wishlist games
-        progress.update(overall, description="[4/5] Matching wishlist games")
+        overall = progress.add_task(
+            f"[bold]Overall ({total_to_match} games)", total=total_to_match
+        )
         wishlist_matches = match_games(
             wishlist_names, steam_apps, config.match_threshold, overrides,
-            progress=progress,
+            progress=progress, overall_task=overall,
             progress_description=f"  Wishlist ({len(wishlist_names)} games)",
         )
-        progress.advance(overall)
-
-        # Step 5 — Match done/played games
-        progress.update(overall, description="[5/5] Matching played/backlog games")
         done_matches = match_games(
             done_names, steam_apps, config.match_threshold, overrides,
-            progress=progress,
+            progress=progress, overall_task=overall,
             progress_description=f"  Played/backlog ({len(done_names)} games)",
         )
-        progress.advance(overall)
 
     # Resolve ambiguous matches interactively before building the plan
     if interactive:

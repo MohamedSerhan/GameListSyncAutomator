@@ -86,13 +86,14 @@ def match_games(
     threshold: int = 85,
     overrides: dict[str, int | None] | None = None,
     progress=None,
+    overall_task=None,
     progress_description: str | None = None,
 ) -> list[MatchResult]:
     """Match Backloggd game names to Steam app IDs using fuzzy matching.
 
     progress: an active rich.progress.Progress instance (optional).
-              When provided, a sub-task is added for this batch of games.
-    progress_description: label shown on the progress bar.
+    overall_task: task ID for the shared overall bar (advanced alongside the sub-task).
+    progress_description: label shown on the sub-task bar.
     """
     overrides = overrides or {}
     steam_names_list = list(steam_apps.keys())
@@ -189,6 +190,8 @@ def match_games(
 
         if _task is not None:
             progress.advance(_task)
+        if overall_task is not None:
+            progress.advance(overall_task)
 
     return results
 
