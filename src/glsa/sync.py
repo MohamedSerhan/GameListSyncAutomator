@@ -125,7 +125,7 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
         BarColumn(),
         MofNCompleteColumn(),
         console=console,
-        transient=True,
+        transient=False,
     ) as progress:
         overall = progress.add_task(
             f"[bold]Overall ({total_to_match} games)", total=total_to_match
@@ -224,6 +224,7 @@ def compute_sync_plan(config: Config, interactive: bool = True) -> SyncPlan:
 
 def display_sync_plan(plan: SyncPlan) -> None:
     """Display the sync plan as a rich table."""
+    console.print("\n[bold]Report[/]")
     if plan.to_add:
         table = Table(title="Games to ADD to Steam Wishlist", style="green")
         table.add_column("Backloggd Name")
