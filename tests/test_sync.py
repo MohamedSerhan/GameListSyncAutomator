@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from glsa.snapshot import GameEntry, Snapshot
 from glsa.sync import SyncPlan, compute_sync_plan
 
 _PATCH = "glsa.sync"
@@ -26,6 +27,18 @@ def _apps(*name_id_pairs: tuple[str, int]) -> dict[str, list[int]]:
     return {name: [id_] for name, id_ in name_id_pairs}
 
 
+def _make_snapshot(games: dict[int, tuple[str, str]]) -> Snapshot:
+    """Build a Snapshot from {app_id: (steam_name, backloggd_name)}."""
+    return Snapshot(
+        version=1,
+        timestamp="2026-04-01T00:00:00+00:00",
+        synced_games={
+            app_id: GameEntry(steam_app_id=app_id, steam_name=sn, backloggd_name=bn)
+            for app_id, (sn, bn) in games.items()
+        },
+    )
+
+
 def _run_plan(
     *,
     wishlist_names=None,
@@ -37,6 +50,7 @@ def _run_plan(
     overrides=None,
     keep_ids=None,
     match_threshold=85,
+    snapshot=None,
 ):
     """Run compute_sync_plan with all external I/O mocked out."""
     wishlist_names = wishlist_names or []
@@ -67,7 +81,7 @@ def _run_plan(
         patch(f"{_PATCH}.get_steam_app_list", return_value=steam_apps),
         patch(f"{_PATCH}.fill_wishlist_names", side_effect=lambda w, _: w),
     ):
-        return compute_sync_plan(config, interactive=False)
+        return compute_sync_plan(config, interactive=False, snapshot=snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -446,8 +460,181 @@ class TestComplexScenarios:
         plan = _run_plan()
         assert plan.to_add == []
         assert plan.to_remove == []
+        assert plan.to_remove_propagated == []
+        assert plan.to_remove_from_backloggd == []
         assert plan.unmatched == []
         assert plan.already_synced == []
         assert plan.skipped == []
         assert plan.kept == []
         assert plan.steam_only == []
+
+
+# ---------------------------------------------------------------------------
+# Deletion propagation (snapshot-based)
+# ---------------------------------------------------------------------------
+
+class TestDeletionPropagation:
+    def test_no_snapshot_no_propagation(self):
+        """Without a snapshot, no deletion propagation occurs."""
+        plan = _run_plan(
+            wishlist_names=[],
+            steam_wishlist={504230: "celeste"},
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=None,
+        )
+        assert len(plan.to_remove_propagated) == 0
+        assert len(plan.to_remove_from_backloggd) == 0
+        # Should still be steam_only
+        assert any(m.steam_app_id == 504230 for m in plan.steam_only)
+
+    def test_stable_game_not_propagated(self):
+        """Game in snapshot + on both platforms → already_synced, no propagation."""
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        plan = _run_plan(
+            wishlist_names=["Celeste"],
+            steam_wishlist={504230: "celeste"},
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=snap,
+        )
+        assert len(plan.to_remove_propagated) == 0
+        assert len(plan.to_remove_from_backloggd) == 0
+        assert any(m.steam_app_id == 504230 for m in plan.already_synced)
+
+    def test_removed_from_backloggd_propagates_to_steam(self):
+        """Game in snapshot + on Steam + NOT on Backloggd → remove from Steam."""
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        plan = _run_plan(
+            wishlist_names=[],  # Celeste removed from Backloggd
+            played_names=["unrelated filler"],  # keep Backloggd non-empty (scrape succeeded)
+            steam_wishlist={504230: "celeste"},
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=snap,
+        )
+        assert len(plan.to_remove_propagated) == 1
+        assert plan.to_remove_propagated[0].steam_app_id == 504230
+
+    def test_removed_from_steam_propagates_to_backloggd(self):
+        """Game in snapshot + NOT on Steam + on Backloggd → remove from Backloggd."""
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        plan = _run_plan(
+            wishlist_names=["Celeste"],
+            steam_wishlist={},  # Celeste removed from Steam
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=snap,
+        )
+        assert len(plan.to_remove_from_backloggd) == 1
+        assert plan.to_remove_from_backloggd[0].steam_app_id == 504230
+
+    def test_removed_from_both_no_action(self):
+        """Game in snapshot + NOT on either platform → no action."""
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        plan = _run_plan(
+            wishlist_names=[],
+            played_names=["unrelated filler"],  # keep Backloggd non-empty (scrape succeeded)
+            steam_wishlist={},
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=snap,
+        )
+        assert len(plan.to_remove_propagated) == 0
+        assert len(plan.to_remove_from_backloggd) == 0
+
+    def test_new_game_not_in_snapshot_still_added(self):
+        """Game NOT in snapshot + on Backloggd only → to_add (normal behavior)."""
+        snap = _make_snapshot({})  # Empty snapshot
+        plan = _run_plan(
+            wishlist_names=["Hollow Knight"],
+            steam_wishlist={},
+            steam_apps=_apps(("hollow knight", 367520)),
+            snapshot=snap,
+        )
+        assert len(plan.to_add) == 1
+        assert plan.to_add[0].steam_app_id == 367520
+        assert len(plan.to_remove_propagated) == 0
+
+    def test_keep_list_protects_propagated_removal(self):
+        """Keep list prevents propagated removal from Steam."""
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        plan = _run_plan(
+            wishlist_names=[],  # Celeste removed from Backloggd
+            played_names=["unrelated filler"],  # keep Backloggd non-empty (scrape succeeded)
+            steam_wishlist={504230: "celeste"},
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=snap,
+            keep_ids={504230},
+        )
+        assert len(plan.to_remove_propagated) == 0
+        assert any(m.steam_app_id == 504230 for m in plan.kept)
+
+    def test_unmatched_safety_prevents_false_deletion(self):
+        """If snapshot backloggd_name is in unmatched list, don't propagate deletion.
+
+        This handles the case where a game is still on Backloggd but fuzzy
+        matching failed (e.g. Steam app list cache is stale).
+        """
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        plan = _run_plan(
+            wishlist_names=["Celeste"],  # Still on Backloggd
+            steam_wishlist={504230: "celeste"},
+            steam_apps={},  # Empty → match fails → Celeste is unmatched
+            snapshot=snap,
+        )
+        # Celeste is unmatched (no steam apps to match against)
+        assert any(m.backloggd_name == "Celeste" for m in plan.unmatched)
+        # Should NOT be propagated for deletion
+        assert len(plan.to_remove_propagated) == 0
+
+    def test_done_game_takes_priority_over_propagation(self):
+        """Game moved to played/backlog uses existing to_remove, not propagation."""
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        plan = _run_plan(
+            wishlist_names=[],
+            played_names=["Celeste"],  # Moved to played
+            steam_wishlist={504230: "celeste"},
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=snap,
+        )
+        # Should be in to_remove (status change), not to_remove_propagated
+        assert any(m.steam_app_id == 504230 for m in plan.to_remove)
+        assert len(plan.to_remove_propagated) == 0
+
+    def test_multiple_propagations(self):
+        """Multiple games can be propagated simultaneously."""
+        snap = _make_snapshot({
+            504230: ("celeste", "Celeste"),
+            367520: ("hollow knight", "Hollow Knight"),
+        })
+        plan = _run_plan(
+            wishlist_names=[],  # Both removed from Backloggd
+            played_names=["unrelated filler"],  # keep Backloggd non-empty (scrape succeeded)
+            steam_wishlist={504230: "celeste", 367520: "hollow knight"},
+            steam_apps=_apps(("celeste", 504230), ("hollow knight", 367520)),
+            snapshot=snap,
+        )
+        assert len(plan.to_remove_propagated) == 2
+        propagated_ids = {m.steam_app_id for m in plan.to_remove_propagated}
+        assert propagated_ids == {504230, 367520}
+
+
+class TestBackloggdEmptyGuard:
+    """If Backloggd scrape returns 0 games but snapshot is non-empty, abort."""
+
+    def test_empty_backloggd_with_snapshot_aborts(self):
+        import click as _click
+        snap = _make_snapshot({504230: ("celeste", "Celeste")})
+        with pytest.raises(_click.ClickException):
+            _run_plan(
+                wishlist_names=[],
+                steam_wishlist={504230: "celeste"},
+                steam_apps=_apps(("celeste", 504230)),
+                snapshot=snap,
+            )
+
+    def test_empty_backloggd_without_snapshot_allowed(self):
+        """First run (no snapshot) with empty Backloggd is fine — nothing to propagate."""
+        plan = _run_plan(
+            wishlist_names=[],
+            steam_wishlist={504230: "celeste"},
+            steam_apps=_apps(("celeste", 504230)),
+            snapshot=None,
+        )
+        assert plan.to_remove_propagated == []

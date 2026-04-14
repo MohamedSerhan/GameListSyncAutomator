@@ -11,6 +11,7 @@ from rich.logging import RichHandler
 from .config import DEFAULT_DATA_DIR, load_config
 from .overrides import load_keep_list, load_overrides, save_keep_list, save_overrides
 from .secure_config import config_exists, encrypt_config, get_config_path
+from .snapshot import load_snapshot, save_snapshot, Snapshot
 from .steam_browser import ensure_steam_login
 from .sync import compute_sync_plan, display_sync_plan, execute_sync_plan
 
@@ -41,6 +42,12 @@ def main(ctx: click.Context, verbose: bool) -> None:
       5. glsa sync --dry-run   Preview what would change
       6. glsa sync             Execute the sync (Backloggd -> Steam)
       7. glsa sync-backloggd   Add Steam-only wishlist games to Backloggd
+
+    \b
+    Deletion propagation:
+      glsa snapshot show       View tracked games
+      glsa snapshot reset      Start fresh (no deletions next sync)
+      glsa snapshot forget ID  Stop tracking a specific game
 
     \b
     Fine-tuning matches:
@@ -162,28 +169,35 @@ def login(service: str) -> None:
 @main.command()
 @click.option("--dry-run", is_flag=True, help="Show what would change without doing it")
 @click.option("--no-remove", is_flag=True, help="Only add games, never remove from Steam")
+@click.option("--no-propagate", is_flag=True, help="Disable deletion propagation for this run")
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
 @click.option("--with-backloggd", "-b", is_flag=True,
               help="Also sync Steam-only games back to Backloggd (reuses the same plan)")
-def sync(dry_run: bool, no_remove: bool, force: bool, with_backloggd: bool) -> None:
+def sync(dry_run: bool, no_remove: bool, no_propagate: bool, force: bool, with_backloggd: bool) -> None:
     """Sync Backloggd wishlist to Steam wishlist."""
     config = load_config()
-    plan = compute_sync_plan(config)
+    snapshot = None if no_propagate else load_snapshot(config.data_dir)
+    if snapshot:
+        console.print(f"[dim]Loaded snapshot ({len(snapshot.synced_games)} games tracked)[/]")
+    plan = compute_sync_plan(config, snapshot=snapshot)
     display_sync_plan(plan)
 
-    has_steam_changes = bool(plan.to_add or plan.to_remove)
+    has_steam_changes = bool(plan.to_add or plan.to_remove or plan.to_remove_propagated)
     has_backloggd_changes = with_backloggd and bool(plan.steam_only)
+    has_backloggd_removals = bool(plan.to_remove_from_backloggd)
 
-    if not has_steam_changes and not has_backloggd_changes:
+    if not has_steam_changes and not has_backloggd_changes and not has_backloggd_removals:
         return
 
-    # display_sync_plan says "Everything is in sync!" when to_add/to_remove are empty.
+    # display_sync_plan says "Everything is in sync!" when no changes.
     # If we still have backloggd work queued, clarify that we're about to do that.
-    if has_backloggd_changes and not has_steam_changes:
-        console.print(
-            f"\n[dim]Steam wishlist is in sync — will push "
-            f"{len(plan.steam_only)} Steam-only game(s) to Backloggd.[/]"
-        )
+    if (has_backloggd_changes or has_backloggd_removals) and not has_steam_changes:
+        parts = []
+        if has_backloggd_changes:
+            parts.append(f"push {len(plan.steam_only)} Steam-only game(s) to Backloggd")
+        if has_backloggd_removals:
+            parts.append(f"remove {len(plan.to_remove_from_backloggd)} game(s) from Backloggd")
+        console.print(f"\n[dim]Steam wishlist is in sync — will {' and '.join(parts)}.[/]")
 
     if dry_run:
         console.print("\n[dim]Dry run -- no changes made.[/]")
@@ -194,8 +208,12 @@ def sync(dry_run: bool, no_remove: bool, force: bool, with_backloggd: bool) -> N
             console.print("[dim]Cancelled.[/]")
             return
 
-    if has_steam_changes:
-        execute_sync_plan(plan, config, no_remove=no_remove)
+    execute_sync_plan(
+        plan, config,
+        no_remove=no_remove,
+        snapshot=snapshot,
+        backloggd_sync=with_backloggd or has_backloggd_removals,
+    )
 
     if has_backloggd_changes:
         _sync_backloggd_from_plan(plan, config)
@@ -252,13 +270,16 @@ def sync_backloggd(dry_run: bool, force: bool) -> None:
 def status() -> None:
     """Show current state of Backloggd and Steam wishlists."""
     config = load_config()
-    plan = compute_sync_plan(config)
+    snap = load_snapshot(config.data_dir)
+    plan = compute_sync_plan(config, snapshot=snap)
 
     console.print(f"\n[bold]Summary:[/]")
     console.print(f"  Backloggd wishlist games matched: {len(plan.to_add) + len(plan.already_synced)}")
     console.print(f"  Already on Steam wishlist:        {len(plan.already_synced)}")
     console.print(f"  To add to Steam:                  {len(plan.to_add)}")
     console.print(f"  To remove from Steam:             {len(plan.to_remove)}")
+    console.print(f"  To remove from Steam (propagated): {len(plan.to_remove_propagated)}")
+    console.print(f"  To remove from Backloggd:          {len(plan.to_remove_from_backloggd)}")
     console.print(f"  Kept (won't remove):              {len(plan.kept)}")
     console.print(f"  Skipped (not on Steam):            {len(plan.skipped)}")
     console.print(f"  Unmatched (no Steam match):        {len(plan.unmatched)}")
@@ -416,3 +437,53 @@ def unschedule() -> None:
         console.print(f"[green]{msg}[/]")
     else:
         console.print(f"[yellow]{msg}[/]")
+
+
+@main.group()
+def snapshot() -> None:
+    """Manage the sync snapshot (used for deletion propagation)."""
+    pass
+
+
+@snapshot.command(name="show")
+def snapshot_show() -> None:
+    """Display current snapshot contents."""
+    config = load_config()
+    snap = load_snapshot(config.data_dir)
+    if not snap:
+        console.print("[dim]No snapshot found. Run a sync to create one.[/]")
+        return
+    console.print(f"[bold]Snapshot[/] ({len(snap.synced_games)} games)")
+    console.print(f"  Last updated: {snap.timestamp}")
+    for app_id, entry in sorted(snap.synced_games.items(), key=lambda x: x[1].steam_name.lower()):
+        console.print(f"  {entry.steam_name} (app {app_id})")
+
+
+@snapshot.command(name="reset")
+def snapshot_reset() -> None:
+    """Delete snapshot to start fresh (next sync won't propagate deletions)."""
+    config = load_config()
+    snap_path = Path(config.data_dir) / "snapshot.json"
+    if snap_path.exists():
+        snap_path.unlink()
+        console.print("[green]Snapshot deleted. Next sync will behave like a first run.[/]")
+    else:
+        console.print("[dim]No snapshot found.[/]")
+
+
+@snapshot.command(name="forget")
+@click.argument("app_id", type=int)
+def snapshot_forget(app_id: int) -> None:
+    """Remove a game from the snapshot (prevents deletion propagation for it)."""
+    config = load_config()
+    snap = load_snapshot(config.data_dir)
+    if not snap:
+        console.print("[dim]No snapshot found.[/]")
+        return
+    if app_id in snap.synced_games:
+        name = snap.synced_games[app_id].steam_name
+        del snap.synced_games[app_id]
+        save_snapshot(config.data_dir, snap)
+        console.print(f"[green]Removed {name} (app {app_id}) from snapshot[/]")
+    else:
+        console.print(f"[dim]App {app_id} not in snapshot[/]")

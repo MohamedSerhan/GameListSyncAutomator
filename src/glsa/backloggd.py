@@ -10,6 +10,28 @@ BASE_URL = "https://backloggd.com"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 PAGE_DELAY = 0.5  # seconds between page requests
 
+# Bunny Shield (Backloggd's anti-bot layer, similar to Cloudflare) serves a
+# JS proof-of-work challenge page instead of the real HTML. httpx cannot solve
+# it. These markers identify the challenge so we fail loudly instead of
+# silently treating the empty challenge page as "user has 0 games".
+_CHALLENGE_MARKERS = (
+    "bunny-shield",
+    "Establishing a secure connection",
+    "shield-challenge.js",
+)
+
+
+class BackloggdChallengeError(RuntimeError):
+    """Raised when Backloggd returns an anti-bot challenge page instead of content."""
+
+
+def _is_challenge_page(html: str) -> bool:
+    # Challenge pages are tiny (~1-2 KB) and contain the shield markers.
+    # Real profile pages are 100+ KB.
+    if len(html) > 10_000:
+        return False
+    return any(marker in html for marker in _CHALLENGE_MARKERS)
+
 
 def get_backloggd_games(username: str, status: str) -> list[str]:
     """Return list of game titles for a given status type.
@@ -40,6 +62,12 @@ def get_backloggd_games(username: str, status: str) -> list[str]:
                 break
 
             resp.raise_for_status()
+            if _is_challenge_page(resp.text):
+                raise BackloggdChallengeError(
+                    f"Backloggd returned an anti-bot challenge page for "
+                    f"{status} page {page} (Bunny Shield). httpx cannot solve it — "
+                    f"use the Playwright-based scraper instead."
+                )
             soup = BeautifulSoup(resp.text, "lxml")
 
             # Game cards are in div.rating-hover containers
